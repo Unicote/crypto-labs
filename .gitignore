@@ -1,0 +1,8 @@
+# Enviroment
+/.idea/
+
+# macOS
+.DS_Store
+
+# Output
+/out/
