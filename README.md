@@ -5,6 +5,7 @@
 | ЛР                                   | Решение                                                                 | Тесты                                                                                                                       |
 |--------------------------------------|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | [1 (DES, DEAL)](#лр-1-des-и-deal)    | [des.go](algorithms/des/des.go), [deal.go](algorithms/deal/deal.go)   | [des_test.go](tests/des_test.go), [deal_test.go](tests/deal_test.go)    |
+| 2 (RSA)                              | [numtheory](internal/numtheory), [primality](internal/primality), [rsa.go](algorithms/rsa/rsa.go), [wiener.go](attacks/wiener/wiener.go) | [numtheory_test.go](tests/numtheory_test.go), [primality_test.go](tests/primality_test.go), [rsa_test.go](tests/rsa_test.go) |
 
 
 Запуск:

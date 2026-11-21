@@ -1,10 +1,11 @@
 package cipher
 
 import (
-	"errors"
+	"bufio"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 const fileChunkSize = 64 * 1024
@@ -18,83 +19,93 @@ func (c *Context) DecryptFile(inputPath, outputPath string) <-chan BytesResult {
 }
 
 func (c *Context) cryptFile(inputPath, outputPath string, operation chunkOperation) <-chan BytesResult {
-	ch := make(chan BytesResult, 1)
-	go func() {
-		var result BytesResult
-		defer func() {
-			ch <- result
-			close(ch)
-		}()
-
-		input, err := os.Open(inputPath)
-		if err != nil {
-			result.Err = fmt.Errorf("open input file: %w", err)
-			return
-		}
-		defer func() {
-			if err = input.Close(); err != nil {
-				result.Err = errors.Join(result.Err, fmt.Errorf("close input file: %w", err))
-			}
-		}()
-		info, err := input.Stat()
-		if err != nil {
-			result.Err = fmt.Errorf("stat input file: %w", err)
-			return
-		}
-		if !info.Mode().IsRegular() {
-			result.Err = fmt.Errorf("input %q is not a regular file", inputPath)
-			return
-		}
-
-		if outputInfo, err := os.Stat(outputPath); err == nil && os.SameFile(info, outputInfo) {
-			result.Err = fmt.Errorf("%w: %q", ErrSameFile, outputPath)
-			return
-		}
-
-		output, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-		if err != nil {
-			result.Err = fmt.Errorf("create output file: %w", err)
-			return
-		}
-		defer func() {
-			if err = output.Close(); err != nil {
-				result.Err = errors.Join(result.Err, fmt.Errorf("close output file: %w", err))
-			}
-			if result.Err == nil {
-				return
-			}
-			if err = os.Remove(outputPath); err != nil {
-				result.Err = errors.Join(result.Err, fmt.Errorf("remove incomplete output file: %w", err))
-			}
-		}()
-
+	return TransformFile(inputPath, outputPath, func(input io.Reader, output io.Writer, size int64) error {
 		blockSize := c.algorithm.BlockSize()
 		buf := make([]byte, fileChunkSize/blockSize*blockSize)
-		remaining := info.Size()
 		iv := c.iv
-		for {
-			n, err := io.ReadFull(input, buf[:min(int64(len(buf)), remaining)])
-			if err != nil {
-				result.Err = fmt.Errorf("read input file: %w", err)
-				return
-			}
-			remaining -= int64(n)
-			last := remaining == 0
+		return TransformChunks(input, output, size, buf, func(chunk []byte, last bool) ([]byte, error) {
+			transformed, nextIV, err := operation(chunk, iv, last)
+			iv = nextIV
+			return transformed, err
+		})
+	})
+}
 
-			var chunk []byte
-			chunk, iv, err = operation(buf[:n], iv, last)
-			if err != nil {
-				result.Err = err
-				return
-			}
-			if _, err := output.Write(chunk); err != nil {
-				result.Err = fmt.Errorf("write output file: %w", err)
-				return
-			}
-			if last {
-				return
-			}
+// TransformChunks transforms a file of the given size using a reusable buffer.
+// It calls operation once with an empty final chunk for an empty file.
+func TransformChunks(input io.Reader, output io.Writer, size int64, buffer []byte, operation func([]byte, bool) ([]byte, error)) error {
+	if len(buffer) == 0 {
+		return fmt.Errorf("input chunk size must be positive")
+	}
+	remaining := size
+	for {
+		chunk := buffer[:min(int64(len(buffer)), remaining)]
+		if _, err := io.ReadFull(input, chunk); err != nil {
+			return fmt.Errorf("read input file: %w", err)
 		}
+		remaining -= int64(len(chunk))
+		last := remaining == 0
+
+		transformed, err := operation(chunk, last)
+		if err != nil {
+			return err
+		}
+		written, err := output.Write(transformed)
+		if err != nil {
+			return fmt.Errorf("write output file: %w", err)
+		}
+		if written != len(transformed) {
+			return io.ErrShortWrite
+		}
+		if last {
+			return nil
+		}
+	}
+}
+
+func TransformFile(inputPath, outputPath string, operation func(io.Reader, io.Writer, int64) error) <-chan BytesResult {
+	result := make(chan BytesResult, 1)
+	go func() {
+		defer close(result)
+		result <- BytesResult{Err: transformFile(inputPath, outputPath, operation)}
 	}()
-	return ch
+	return result
+}
+
+func transformFile(inputPath, outputPath string, operation func(io.Reader, io.Writer, int64) error) error {
+	input, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("open input file: %w", err)
+	}
+	defer input.Close()
+
+	info, err := input.Stat()
+	if err != nil {
+		return fmt.Errorf("stat input file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("input %q is not a regular file", inputPath)
+	}
+	if existing, err := os.Stat(outputPath); err == nil && os.SameFile(info, existing) {
+		return fmt.Errorf("%w: %q", ErrSameFile, outputPath)
+	}
+
+	output, err := os.CreateTemp(filepath.Dir(outputPath), ".cipher-*")
+	if err != nil {
+		return fmt.Errorf("create temporary output file: %w", err)
+	}
+	defer os.Remove(output.Name())
+	writer := bufio.NewWriter(output)
+	err = operation(bufio.NewReaderSize(input, fileChunkSize), writer, info.Size())
+	if err == nil {
+		err = writer.Flush()
+	}
+	closeErr := output.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(output.Name(), outputPath)
 }
